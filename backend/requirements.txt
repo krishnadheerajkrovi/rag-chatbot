@@ -20,4 +20,4 @@ arize-phoenix
 openinference-instrumentation-langchain
 opentelemetry-sdk
 opentelemetry-exporter-otlp
-pypdf
+pymupdf

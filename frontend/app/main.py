@@ -175,7 +175,10 @@ def chat_page():
         st.divider()
         
         # View documents
-        if st.button("View My Documents"):
+        if st.button("📚 View My Documents"):
+            st.session_state.show_documents = True
+        
+        if st.session_state.get('show_documents'):
             try:
                 response = requests.get(
                     f"{API_BASE_URL}/chat/documents",
@@ -186,12 +189,79 @@ def chat_page():
                     if docs:
                         st.subheader("Your Documents")
                         for doc in docs:
-                            st.write(f"📄 {doc['title']}")
-                            st.caption(f"Type: {doc['file_type']} | Size: {doc['file_size']} bytes")
+                            col1, col2 = st.columns([4, 1])
+                            with col1:
+                                st.write(f"📄 {doc['title']}")
+                                st.caption(f"Type: {doc['file_type']} | Size: {doc['file_size']} bytes")
+                            with col2:
+                                if st.button("🗑️", key=f"delete_{doc['id']}", help="Delete"):
+                                    try:
+                                        delete_response = requests.delete(
+                                            f"{API_BASE_URL}/chat/documents/{doc['id']}",
+                                            headers=get_headers()
+                                        )
+                                        if delete_response.status_code == 200:
+                                            st.success("Deleted!")
+                                            st.session_state.show_documents = False
+                                            st.rerun()
+                                        else:
+                                            st.error("Delete failed")
+                                    except Exception as e:
+                                        st.error(f"Error: {str(e)}")
                     else:
                         st.info("No documents uploaded yet")
+                        st.session_state.show_documents = False
             except Exception as e:
                 st.error(f"Error: {str(e)}")
+        
+        st.divider()
+        
+        # Clear chat history
+        if st.button("🗑️ Clear Chat History", help="Delete all chat messages"):
+            try:
+                response = requests.delete(
+                    f"{API_BASE_URL}/chat/sessions/clear",
+                    headers=get_headers()
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    # Clear ALL frontend session state
+                    for key in list(st.session_state.keys()):
+                        if key not in ['token', 'user']:  # Keep auth state
+                            del st.session_state[key]
+                    # Reset to empty
+                    st.session_state.messages = []
+                    st.session_state.session_id = None
+                    st.success(f"✅ Cleared {result['sessions_deleted']} chat session(s)")
+                    st.rerun()
+                else:
+                    st.error("Failed to clear chat history")
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
+        
+        st.divider()
+        
+        # Reindex all documents
+        if st.button("🔄 Reindex All Documents", help="Clear and rebuild the entire vector store"):
+            if st.session_state.get('confirm_reindex'):
+                with st.spinner("Reindexing all documents... This may take a while."):
+                    try:
+                        response = requests.post(
+                            f"{API_BASE_URL}/chat/documents/reindex-all",
+                            headers=get_headers()
+                        )
+                        if response.status_code == 200:
+                            result = response.json()
+                            st.success(f"✅ Reindexed {result['documents_reindexed']} documents ({result['total_chunks']} chunks)")
+                            st.session_state.confirm_reindex = False
+                            st.rerun()
+                        else:
+                            st.error("Failed to reindex documents")
+                    except Exception as e:
+                        st.error(f"Error: {str(e)}")
+            else:
+                st.warning("⚠️ This will clear your vector store and reprocess all documents. Click again to confirm.")
+                st.session_state.confirm_reindex = True
     
     # Main chat area
     chat_container = st.container()

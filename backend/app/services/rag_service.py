@@ -1,11 +1,13 @@
 from typing import List, Dict, Any
 import os
+import shutil
 from langchain_community.document_loaders import (
     PyPDFLoader,
     TextLoader,
     Docx2txtLoader,
     UnstructuredMarkdownLoader,
 )
+from langchain_community.document_loaders import PyMuPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_community.embeddings import OllamaEmbeddings
@@ -25,18 +27,19 @@ class DocumentProcessor:
             base_url=settings.OLLAMA_BASE_URL
         )
         self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
+            chunk_size=1500,  # Larger chunks to capture more context
+            chunk_overlap=300,  # More overlap to avoid missing info at boundaries
             length_function=len,
-            separators=["\n\n", "\n", " ", ""]
+            separators=["\n\n", "\n", ".", " ", ""]  # Added period separator
         )
 
     def load_document(self, file_path: str):
         """Load a document from file path based on file extension"""
         file_extension = os.path.splitext(file_path)[1].lower()
         
+        # Use PyMuPDF for better PDF parsing (preserves formatting better)
         loader_map = {
-            '.pdf': PyPDFLoader,
+            '.pdf': PyMuPDFLoader,  # Better PDF parser than PyPDFLoader
             '.txt': TextLoader,
             '.md': UnstructuredMarkdownLoader,
             '.docx': Docx2txtLoader,
@@ -46,7 +49,14 @@ class DocumentProcessor:
             raise ValueError(f"Unsupported file type: {file_extension}")
         
         loader = loader_map[file_extension](file_path)
-        return loader.load()
+        documents = loader.load()
+        
+        # Log the extracted content for debugging
+        print(f"📄 Loaded {len(documents)} pages from {os.path.basename(file_path)}")
+        if documents:
+            print(f"   First 200 chars: {documents[0].page_content[:200]}...")
+        
+        return documents
 
     def process_document(self, file_path: str) -> List[Dict[str, Any]]:
         """Process a document and return chunks with metadata"""
@@ -133,8 +143,12 @@ class RAGService:
         )
         
         self.retriever = self.vector_store.as_retriever(
-            search_type="mmr",
-            search_kwargs={"k": 4, "fetch_k": 10}
+            search_type="mmr",  # Maximal Marginal Relevance for diversity
+            search_kwargs={
+                "k": 8,  # Retrieve more documents (was 4)
+                "fetch_k": 20,  # Fetch more candidates before MMR (was 10)
+                "lambda_mult": 0.5  # Balance between relevance and diversity
+            }
         )
         
         # Create history-aware retriever
@@ -196,16 +210,38 @@ class RAGService:
             "chat_history": formatted_history
         })
         
+        # Log retrieved documents for debugging
+        retrieved_docs = result.get("context", [])
+        print(f"\n🔍 Query: {question}")
+        print(f"📚 Retrieved {len(retrieved_docs)} documents:")
+        for i, doc in enumerate(retrieved_docs[:3]):  # Show first 3
+            content_preview = doc.page_content[:150].replace('\n', ' ')
+            print(f"   {i+1}. {content_preview}...")
+        
         return {
             "answer": result["answer"],
-            "source_documents": result.get("context", []),
+            "source_documents": retrieved_docs,
             "question": question
         }
     
     def clear_vector_store(self):
         """Clear the vector store for this user"""
+        # Delete the collection from Chroma
         if self.vector_store:
-            self.vector_store.delete_collection()
+            try:
+                self.vector_store.delete_collection()
+            except Exception as e:
+                print(f"⚠️ Error deleting collection: {e}")
+            
             self.vector_store = None
             self.retriever = None
             self.rag_chain = None
+        
+        # Also delete the physical directory to ensure complete cleanup
+        persist_directory = f"{settings.VECTOR_STORE_PATH}/user_{self.user_id}"
+        if os.path.exists(persist_directory):
+            try:
+                shutil.rmtree(persist_directory)
+                print(f"🗑️ Deleted vector store directory: {persist_directory}")
+            except Exception as e:
+                print(f"⚠️ Error deleting directory: {e}")

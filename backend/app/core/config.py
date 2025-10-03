@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     
     # Phoenix Configuration (Arize Phoenix for tracing)
     PHOENIX_ENABLED: bool = True
-    PHOENIX_COLLECTOR_ENDPOINT: str = "http://host.docker.internal:6006"
+    PHOENIX_COLLECTOR_ENDPOINT: str = "http://host.docker.internal:4317"
     PHOENIX_PROJECT_NAME: str = "rag-chatbot"
     
     class Config:
@@ -33,14 +33,19 @@ settings = Settings()
 
 # Configure Phoenix tracing
 if settings.PHOENIX_ENABLED:
-    from phoenix.otel import register
-    from openinference.instrumentation.langchain import LangChainInstrumentor
-    
-    # Register Phoenix as the OTLP endpoint
-    tracer_provider = register(
-        project_name=settings.PHOENIX_PROJECT_NAME,
-        endpoint=settings.PHOENIX_COLLECTOR_ENDPOINT,
-    )
-    
-    # Instrument LangChain
-    LangChainInstrumentor().instrument(tracer_provider=tracer_provider)
+    try:
+        from phoenix.otel import register
+        from openinference.instrumentation.langchain import LangChainInstrumentor
+        
+        # Register Phoenix as the OTLP endpoint (gRPC)
+        tracer_provider = register(
+            project_name=settings.PHOENIX_PROJECT_NAME,
+            endpoint=settings.PHOENIX_COLLECTOR_ENDPOINT,
+        )
+        
+        # Instrument LangChain
+        LangChainInstrumentor().instrument(tracer_provider=tracer_provider)
+        
+        print(f"✅ Phoenix tracing enabled - sending to {settings.PHOENIX_COLLECTOR_ENDPOINT}")
+    except Exception as e:
+        print(f"⚠️  Phoenix tracing failed to initialize: {e}")

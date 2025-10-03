@@ -78,6 +78,9 @@ async def chat_query(
         
         # Get chat history
         chat_history = get_chat_history(db, session_id)
+        print(f"📜 Chat history for session {session_id}: {len(chat_history)} messages")
+        if chat_history:
+            print(f"   Last message: {chat_history[-1]['content'][:100]}...")
         
         # Initialize RAG service with user context
         user_display_name = current_user.full_name or current_user.username
@@ -126,6 +129,33 @@ async def get_sessions(
         ))
     
     return result
+
+@router.delete("/sessions/clear")
+async def clear_chat_history(
+    db: Session = Depends(get_db),
+    current_user: user_model.User = Depends(security.get_current_user)
+):
+    """Clear all chat history for the current user"""
+    try:
+        # Delete all sessions (cascades to messages)
+        sessions = db.query(chat_model.ChatSession).filter(
+            chat_model.ChatSession.user_id == current_user.id
+        ).all()
+        
+        session_count = len(sessions)
+        
+        for session in sessions:
+            db.delete(session)
+        
+        db.commit()
+        
+        return {
+            "message": "Chat history cleared successfully",
+            "sessions_deleted": session_count
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/upload", response_model=schemas.Document)
 async def upload_document(
@@ -192,3 +222,170 @@ async def get_documents(
     ).order_by(document_model.Document.created_at.desc()).all()
     
     return documents
+
+@router.delete("/documents/{document_id}")
+async def delete_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: user_model.User = Depends(security.get_current_user)
+):
+    """Delete a document and its embeddings"""
+    try:
+        # Get the document
+        document = db.query(document_model.Document).filter(
+            document_model.Document.id == document_id,
+            document_model.Document.user_id == current_user.id
+        ).first()
+        
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Delete the file
+        if os.path.exists(document.file_path):
+            os.remove(document.file_path)
+        
+        # Delete from database (cascades to chunks)
+        db.delete(document)
+        db.commit()
+        
+        # Check if this was the last document - if so, clear vector store
+        remaining_docs = db.query(document_model.Document).filter(
+            document_model.Document.user_id == current_user.id
+        ).count()
+        
+        if remaining_docs == 0:
+            print(f"🗑️ Last document deleted, clearing vector store for user {current_user.id}")
+            try:
+                user_display_name = current_user.full_name or current_user.username
+                rag_service = RAGService(user_id=current_user.id, user_name=user_display_name)
+                rag_service.clear_vector_store()
+            except Exception as e:
+                print(f"⚠️ Error clearing vector store: {e}")
+        
+        return {
+            "message": "Document deleted successfully",
+            "document_id": document_id,
+            "vector_store_cleared": remaining_docs == 0
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/documents/{document_id}/reprocess")
+async def reprocess_document(
+    document_id: int,
+    db: Session = Depends(get_db),
+    current_user: user_model.User = Depends(security.get_current_user)
+):
+    """Reprocess and reindex a document with current settings"""
+    try:
+        # Get the document
+        document = db.query(document_model.Document).filter(
+            document_model.Document.id == document_id,
+            document_model.Document.user_id == current_user.id
+        ).first()
+        
+        if not document:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        if not os.path.exists(document.file_path):
+            raise HTTPException(status_code=404, detail="Document file not found")
+        
+        # Reprocess the document
+        processor = DocumentProcessor()
+        chunks = processor.process_document(document.file_path)
+        
+        # Clear old embeddings and add new ones
+        user_display_name = current_user.full_name or current_user.username
+        rag_service = RAGService(user_id=current_user.id, user_name=user_display_name)
+        
+        # Note: This adds to existing embeddings. For a clean reindex, 
+        # you might want to clear the vector store first
+        rag_service.add_documents(chunks)
+        
+        # Update document status
+        document.is_processed = True
+        db.commit()
+        
+        return {
+            "message": "Document reprocessed successfully",
+            "document_id": document_id,
+            "chunks": len(chunks)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/documents/reindex-all")
+async def reindex_all_documents(
+    db: Session = Depends(get_db),
+    current_user: user_model.User = Depends(security.get_current_user)
+):
+    """Clear vector store and reindex all documents with current settings"""
+    try:
+        # Clear the vector store (always clear cache, even if no documents)
+        user_display_name = current_user.full_name or current_user.username
+        rag_service = RAGService(user_id=current_user.id, user_name=user_display_name)
+        
+        try:
+            rag_service.clear_vector_store()
+            print(f"✅ Cleared vector store for user {current_user.id}")
+        except Exception as e:
+            print(f"⚠️ Error clearing vector store (may not exist): {e}")
+            # Continue anyway - vector store might not exist yet
+        
+        # Get all documents
+        documents = db.query(document_model.Document).filter(
+            document_model.Document.user_id == current_user.id
+        ).all()
+        
+        if not documents:
+            return {
+                "message": "Vector store cleared. No documents to reindex.",
+                "documents_reindexed": 0,
+                "total_documents": 0,
+                "total_chunks": 0
+            }
+        
+        # Reprocess each document
+        processor = DocumentProcessor()
+        total_chunks = 0
+        reindexed_count = 0
+        
+        for document in documents:
+            if os.path.exists(document.file_path):
+                try:
+                    chunks = processor.process_document(document.file_path)
+                    rag_service.add_documents(chunks)
+                    total_chunks += len(chunks)
+                    reindexed_count += 1
+                    document.is_processed = True
+                except Exception as e:
+                    print(f"❌ Error reprocessing {document.title}: {e}")
+                    document.is_processed = False
+            else:
+                print(f"⚠️ File not found for document: {document.title}")
+                document.is_processed = False
+        
+        db.commit()
+        
+        return {
+            "message": "All documents reindexed successfully" if reindexed_count > 0 else "Vector store cleared",
+            "documents_reindexed": reindexed_count,
+            "total_documents": len(documents),
+            "total_chunks": total_chunks
+        }
+        
+    except Exception as e:
+        # Even if there's an error, try to return a meaningful response
+        print(f"❌ Reindex error: {e}")
+        return {
+            "message": f"Reindex completed with errors: {str(e)}",
+            "documents_reindexed": 0,
+            "total_documents": 0,
+            "total_chunks": 0
+        }
