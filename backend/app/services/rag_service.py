@@ -1,0 +1,211 @@
+from typing import List, Dict, Any
+import os
+from langchain_community.document_loaders import (
+    PyPDFLoader,
+    TextLoader,
+    Docx2txtLoader,
+    UnstructuredMarkdownLoader,
+)
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import Chroma
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.chat_models import ChatOllama
+from langchain.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import HumanMessage, AIMessage
+from ..core.config import settings
+
+class DocumentProcessor:
+    """Handles document loading and processing for RAG"""
+    
+    def __init__(self):
+        self.embeddings = OllamaEmbeddings(
+            model=settings.DEFAULT_MODEL,
+            base_url=settings.OLLAMA_BASE_URL
+        )
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            length_function=len,
+            separators=["\n\n", "\n", " ", ""]
+        )
+
+    def load_document(self, file_path: str):
+        """Load a document from file path based on file extension"""
+        file_extension = os.path.splitext(file_path)[1].lower()
+        
+        loader_map = {
+            '.pdf': PyPDFLoader,
+            '.txt': TextLoader,
+            '.md': UnstructuredMarkdownLoader,
+            '.docx': Docx2txtLoader,
+        }
+        
+        if file_extension not in loader_map:
+            raise ValueError(f"Unsupported file type: {file_extension}")
+        
+        loader = loader_map[file_extension](file_path)
+        return loader.load()
+
+    def process_document(self, file_path: str) -> List[Dict[str, Any]]:
+        """Process a document and return chunks with metadata"""
+        try:
+            documents = self.load_document(file_path)
+            docs = self.text_splitter.split_documents(documents)
+            
+            # Add metadata to each chunk
+            for i, doc in enumerate(docs):
+                doc.metadata["chunk_id"] = i
+                doc.metadata["source"] = os.path.basename(file_path)
+                
+            return [{"page_content": doc.page_content, "metadata": doc.metadata} 
+                   for doc in docs]
+                    
+        except Exception as e:
+            raise Exception(f"Error processing document: {str(e)}")
+
+class RAGService:
+    """Production-ready RAG service with history-aware retrieval"""
+    
+    def __init__(self, user_id: int = None, user_name: str = None):
+        self.user_id = user_id
+        self.user_name = user_name or f"User {user_id}"
+        self.embeddings = OllamaEmbeddings(
+            model=settings.DEFAULT_MODEL,
+            base_url=settings.OLLAMA_BASE_URL
+        )
+        self.llm = ChatOllama(
+            model=settings.DEFAULT_MODEL,
+            base_url=settings.OLLAMA_BASE_URL,
+            temperature=0.7
+        )
+        self.vector_store = None
+        self.retriever = None
+        self.rag_chain = None
+        self._setup_chains()
+        
+    def _setup_chains(self):
+        """Set up the RAG chains with history awareness"""
+        # Contextualize question prompt - reformulates questions based on chat history
+        contextualize_q_system_prompt = """
+        Given a chat history and the latest user question which might reference context 
+        in the chat history, formulate a standalone question which can be understood 
+        without the chat history. Do NOT answer the question, just reformulate it if 
+        needed and otherwise return it as is.
+        """
+        
+        self.contextualize_q_prompt = ChatPromptTemplate.from_messages([
+            ("system", contextualize_q_system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ])
+        
+        # QA system prompt - answers questions based on context with user awareness
+        qa_system_prompt = f"""
+        You are a helpful AI assistant. You are currently assisting a user named {self.user_name}.
+        
+        IMPORTANT: When the user asks "what is my name" or "who am I", respond with: "Your name is {self.user_name}."
+        
+        Use the following pieces of context to answer the user's question. If you don't know the 
+        answer based on the context, just say that you don't know, don't try to make up an answer.
+        
+        You are helping {self.user_name} with their personal documents and queries.
+        
+        Context: {{context}}
+        """
+        
+        self.qa_prompt = ChatPromptTemplate.from_messages([
+            ("system", qa_system_prompt),
+            MessagesPlaceholder("chat_history"),
+            ("human", "{input}"),
+        ])
+        
+    def init_vector_store(self, persist_directory: str = None):
+        """Initialize or load the vector store"""
+        if persist_directory is None:
+            persist_directory = f"{settings.VECTOR_STORE_PATH}/user_{self.user_id}"
+            
+        self.vector_store = Chroma(
+            persist_directory=persist_directory,
+            embedding_function=self.embeddings,
+            collection_name=f"user_{self.user_id}_docs"
+        )
+        
+        self.retriever = self.vector_store.as_retriever(
+            search_type="mmr",
+            search_kwargs={"k": 4, "fetch_k": 10}
+        )
+        
+        # Create history-aware retriever
+        history_aware_retriever = create_history_aware_retriever(
+            self.llm,
+            self.retriever,
+            self.contextualize_q_prompt
+        )
+        
+        # Create question-answer chain
+        question_answer_chain = create_stuff_documents_chain(
+            self.llm,
+            self.qa_prompt
+        )
+        
+        # Create the full RAG chain
+        self.rag_chain = create_retrieval_chain(
+            history_aware_retriever,
+            question_answer_chain
+        )
+    
+    def add_documents(self, documents: List[Dict[str, Any]]):
+        """Add documents to the vector store"""
+        if not self.vector_store:
+            self.init_vector_store()
+            
+        texts = [doc["page_content"] for doc in documents]
+        metadatas = [doc["metadata"] for doc in documents]
+        
+        self.vector_store.add_texts(
+            texts=texts,
+            metadatas=metadatas
+        )
+        
+        # Persist the vector store
+        self.vector_store.persist()
+    
+    def _format_chat_history(self, chat_history: List[Dict[str, str]]) -> List:
+        """Convert chat history to LangChain message format"""
+        formatted_history = []
+        for msg in chat_history:
+            if msg["role"] == "user" or msg["role"] == "human":
+                formatted_history.append(HumanMessage(content=msg["content"]))
+            elif msg["role"] == "assistant" or msg["role"] == "ai":
+                formatted_history.append(AIMessage(content=msg["content"]))
+        return formatted_history
+    
+    def query(self, question: str, chat_history: List[Dict[str, str]] = None) -> Dict[str, Any]:
+        """Query the RAG system with a question and chat history"""
+        if not self.rag_chain:
+            self.init_vector_store()
+            
+        # Format chat history
+        formatted_history = self._format_chat_history(chat_history or [])
+        
+        # Invoke the RAG chain
+        result = self.rag_chain.invoke({
+            "input": question,
+            "chat_history": formatted_history
+        })
+        
+        return {
+            "answer": result["answer"],
+            "source_documents": result.get("context", []),
+            "question": question
+        }
+    
+    def clear_vector_store(self):
+        """Clear the vector store for this user"""
+        if self.vector_store:
+            self.vector_store.delete_collection()
+            self.vector_store = None
+            self.retriever = None
+            self.rag_chain = None

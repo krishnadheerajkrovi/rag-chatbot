@@ -1,0 +1,7 @@
+streamlit
+streamlit-option-menu
+requests
+python-dotenv
+streamlit-chat
+python-jose[cryptography]
+pydantic
