@@ -1,18 +1,33 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+import os
 
 from .api import auth, chat
 from .db.base import Base, engine
+from .core.logging_config import setup_logging, get_logger
+from .middleware.logging_middleware import RequestLoggingMiddleware
+
+# Setup logging
+log_level = os.getenv("LOG_LEVEL", "INFO")
+json_logs = os.getenv("JSON_LOGS", "false").lower() == "true"
+setup_logging(log_level=log_level, json_logs=json_logs)
+
+logger = get_logger(__name__)
 
 # Create database tables
+logger.info("Creating database tables...")
 Base.metadata.create_all(bind=engine)
+logger.info("Database tables created successfully")
 
 app = FastAPI(
     title="RAG Chatbot API",
     description="API for multi-user RAG chatbot with Ollama",
     version="0.1.0"
 )
+
+# Add logging middleware (before CORS)
+app.add_middleware(RequestLoggingMiddleware)
 
 # CORS middleware
 app.add_middleware(
@@ -22,6 +37,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+logger.info("Application middlewares configured")
 
 # Include routers
 app.include_router(auth.router, prefix="/auth", tags=["authentication"])

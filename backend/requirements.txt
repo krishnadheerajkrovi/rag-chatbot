@@ -8,16 +8,29 @@ sqlalchemy
 alembic
 psycopg2-binary
 python-dotenv
+
+# LangChain v0.3+ packages
 langchain
 langchain-community
 langchain-core
+langchain-text-splitters
+langchain-chroma
+langchain-ollama
 langgraph
+
+# Vector DB and embeddings
 chromadb
 sentence-transformers
+
+# Validation
 pydantic
 pydantic-settings
+
+# Observability
 arize-phoenix
 openinference-instrumentation-langchain
 opentelemetry-sdk
 opentelemetry-exporter-otlp
+
+# Document processing
 pymupdf
