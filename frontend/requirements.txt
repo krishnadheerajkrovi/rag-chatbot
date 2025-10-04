@@ -1,7 +1,5 @@
 streamlit
-streamlit-option-menu
 requests
 python-dotenv
-streamlit-chat
-python-jose[cryptography]
-pydantic
+streamlit-option-menu
+streamlit-cookies-manager

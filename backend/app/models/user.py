@@ -19,3 +19,4 @@ class User(Base):
     # Relationships
     documents = relationship("Document", back_populates="user", cascade="all, delete-orphan")
     chat_sessions = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")
+    folders = relationship("Folder", back_populates="user", cascade="all, delete-orphan")

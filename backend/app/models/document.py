@@ -14,11 +14,13 @@ class Document(Base):
     file_size = Column(Integer, nullable=False)  # Size in bytes
     is_processed = Column(Boolean, default=False, nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    folder_id = Column(Integer, ForeignKey("folders.id", ondelete="SET NULL"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     # Relationships
     user = relationship("User", back_populates="documents")
+    folder = relationship("Folder", back_populates="documents")
     chunks = relationship("DocumentChunk", back_populates="document", cascade="all, delete-orphan")
 
 class DocumentChunk(Base):

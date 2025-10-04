@@ -34,3 +34,8 @@ opentelemetry-exporter-otlp
 
 # Document processing
 pymupdf
+
+# Testing
+pytest
+pytest-cov
+httpx

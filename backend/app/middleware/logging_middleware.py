@@ -28,7 +28,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         
         # Log incoming request
         logger.info(
-            f"Incoming request",
+            f"{request.method} {request.url.path}",
             extra={
                 "request_id": request_id,
                 "method": request.method,
@@ -46,7 +46,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
             
             # Log response
             logger.info(
-                f"Request completed",
+                f"{request.method} {request.url.path} - {response.status_code} ({round(duration_ms, 2)}ms)",
                 extra={
                     "request_id": request_id,
                     "method": request.method,

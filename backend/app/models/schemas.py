@@ -46,7 +46,32 @@ class Document(DocumentBase):
     file_size: int
     is_processed: bool
     user_id: int
+    folder_id: Optional[int] = None
     created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+# Folder Schemas
+class FolderBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+    parent_folder_id: Optional[int] = None
+
+class FolderCreate(FolderBase):
+    pass
+
+class FolderUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    parent_folder_id: Optional[int] = None
+
+class Folder(FolderBase):
+    id: int
+    user_id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+    is_archived: bool
 
     class Config:
         from_attributes = True
@@ -56,9 +81,30 @@ class ChatMessage(BaseModel):
     role: str
     content: str
 
+class ChatSessionCreate(BaseModel):
+    title: Optional[str] = None
+    folder_id: Optional[int] = None
+
+class ChatSessionUpdate(BaseModel):
+    title: Optional[str] = None
+    folder_id: Optional[int] = None
+
+class ChatSession(BaseModel):
+    id: int
+    session_id: str
+    title: Optional[str] = None
+    folder_id: Optional[int] = None
+    user_id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
 class ChatQuery(BaseModel):
     query: str
     session_id: Optional[str] = None
+    folder_id: Optional[int] = None  # For folder-scoped retrieval
 
 class ChatResponse(BaseModel):
     answer: str

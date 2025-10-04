@@ -3,10 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import os
 
-from .api import auth, chat
+from .api import auth, chat, folders
 from .db.base import Base, engine
 from .core.logging_config import setup_logging, get_logger
 from .middleware.logging_middleware import RequestLoggingMiddleware
+
+# Import all models so SQLAlchemy knows about them
 
 # Setup logging
 log_level = os.getenv("LOG_LEVEL", "INFO")
@@ -15,15 +17,41 @@ setup_logging(log_level=log_level, json_logs=json_logs)
 
 logger = get_logger(__name__)
 
-# Create database tables
-logger.info("Creating database tables...")
+# Create database tables if they don't exist
 Base.metadata.create_all(bind=engine)
-logger.info("Database tables created successfully")
 
 app = FastAPI(
     title="RAG Chatbot API",
-    description="API for multi-user RAG chatbot with Ollama",
-    version="0.1.0"
+    description="""
+    ## Multi-User RAG Chatbot with Folder Organization
+    
+    ### Features:
+    - 🔐 User authentication with JWT
+    - 📁 Folder-based organization
+    - 💬 Multiple chat sessions per user
+    - 📄 Document upload and processing
+    - 🔍 Folder-scoped semantic search
+    - 📦 Archive/restore functionality
+    
+    ### Quick Start:
+    1. Register: POST /auth/register
+    2. Login: POST /auth/token
+    3. Create folder: POST /folders/
+    4. Upload document: POST /chat/upload
+    5. Query: POST /chat/query
+    
+    ### Documentation:
+    - Swagger UI: /docs
+    - ReDoc: /redoc
+    """,
+    version="1.0.0",
+    contact={
+        "name": "RAG Chatbot Support",
+        "email": "support@example.com",
+    },
+    license_info={
+        "name": "MIT",
+    },
 )
 
 # Add logging middleware (before CORS)
@@ -43,6 +71,7 @@ logger.info("Application middlewares configured")
 # Include routers
 app.include_router(auth.router, prefix="/auth", tags=["authentication"])
 app.include_router(chat.router, prefix="/chat", tags=["chat"])
+app.include_router(folders.router, prefix="/folders", tags=["folders"])
 
 @app.get("/")
 async def root():

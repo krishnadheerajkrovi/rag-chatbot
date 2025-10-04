@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from typing import List
 import uuid
@@ -34,8 +34,8 @@ def get_or_create_session(db: Session, session_id: str, user_id: int):
     
     return session
 
-def get_chat_history(db: Session, session_id: str) -> List[dict]:
-    """Get chat history for a session"""
+def _get_chat_history_helper(db: Session, session_id: str) -> List[dict]:
+    """Helper function to get chat history for a session"""
     session = db.query(chat_model.ChatSession).filter(
         chat_model.ChatSession.session_id == session_id
     ).first()
@@ -77,7 +77,7 @@ async def chat_query(
         session = get_or_create_session(db, session_id, current_user.id)
         
         # Get chat history
-        chat_history = get_chat_history(db, session_id)
+        chat_history = _get_chat_history_helper(db, session_id)
         print(f"📜 Chat history for session {session_id}: {len(chat_history)} messages")
         if chat_history:
             print(f"   Last message: {chat_history[-1]['content'][:100]}...")
@@ -86,8 +86,14 @@ async def chat_query(
         user_display_name = current_user.full_name or current_user.username
         rag_service = RAGService(user_id=current_user.id, user_name=user_display_name)
         
-        # Query the RAG system
-        result = rag_service.query(query.query, chat_history)
+        # Determine folder_id for scoped retrieval
+        folder_id = query.folder_id
+        if folder_id is None and session.folder_id:
+            # Use session's folder if not explicitly provided
+            folder_id = session.folder_id
+        
+        # Query the RAG system with optional folder scope
+        result = rag_service.query(query.query, chat_history, folder_id=folder_id)
         
         # Save user message
         save_message(db, session.id, "user", query.query)
@@ -105,7 +111,28 @@ async def chat_query(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/sessions", response_model=List[schemas.ChatHistory])
+@router.post("/sessions", response_model=schemas.ChatSession)
+async def create_session(
+    session_data: schemas.ChatSessionCreate,
+    db: Session = Depends(get_db),
+    current_user: user_model.User = Depends(security.get_current_user)
+):
+    """Create a new chat session"""
+    import uuid
+    
+    new_session = chat_model.ChatSession(
+        session_id=str(uuid.uuid4()),
+        title=session_data.title,
+        folder_id=session_data.folder_id,
+        user_id=current_user.id
+    )
+    db.add(new_session)
+    db.commit()
+    db.refresh(new_session)
+    return new_session
+
+
+@router.get("/sessions", response_model=List[schemas.ChatSession])
 async def get_sessions(
     db: Session = Depends(get_db),
     current_user: user_model.User = Depends(security.get_current_user)
@@ -115,20 +142,35 @@ async def get_sessions(
         chat_model.ChatSession.user_id == current_user.id
     ).order_by(chat_model.ChatSession.updated_at.desc()).all()
     
-    result = []
-    for session in sessions:
-        messages = db.query(chat_model.ChatMessage).filter(
-            chat_model.ChatMessage.session_id == session.id
-        ).order_by(chat_model.ChatMessage.created_at).all()
-        
-        result.append(schemas.ChatHistory(
-            session_id=session.session_id,
-            messages=[schemas.ChatMessage(role=msg.role, content=msg.content) 
-                     for msg in messages],
-            created_at=session.created_at
-        ))
+    return sessions
+
+
+@router.get("/history/{session_id}", response_model=schemas.ChatHistory)
+async def get_chat_history(
+    session_id: str,
+    db: Session = Depends(get_db),
+    current_user: user_model.User = Depends(security.get_current_user)
+):
+    """Get chat history for a specific session"""
+    # Find the session
+    session = db.query(chat_model.ChatSession).filter(
+        chat_model.ChatSession.session_id == session_id,
+        chat_model.ChatSession.user_id == current_user.id
+    ).first()
     
-    return result
+    if not session:
+        raise HTTPException(status_code=404, detail="Chat session not found")
+    
+    # Get messages
+    messages = db.query(chat_model.ChatMessage).filter(
+        chat_model.ChatMessage.session_id == session.id
+    ).order_by(chat_model.ChatMessage.created_at).all()
+    
+    return schemas.ChatHistory(
+        session_id=session.session_id,
+        messages=[schemas.ChatMessage(role=msg.role, content=msg.content) for msg in messages],
+        created_at=session.created_at
+    )
 
 @router.delete("/sessions/clear")
 async def clear_chat_history(
@@ -160,13 +202,25 @@ async def clear_chat_history(
 @router.post("/upload", response_model=schemas.Document)
 async def upload_document(
     file: UploadFile = File(...),
-    title: str = None,
-    description: str = None,
+    title: str = Form(None),
+    description: str = Form(None),
+    folder_id: int = Form(None),
     db: Session = Depends(get_db),
     current_user: user_model.User = Depends(security.get_current_user)
 ):
-    """Upload and process a document"""
+    """Upload and process a document with optional folder assignment"""
+    print(f"📤 Upload received: file={file.filename}, folder_id={folder_id}, title={title}")
     try:
+        # Validate folder if specified
+        if folder_id:
+            from ..models import folder as folder_model
+            folder = db.query(folder_model.Folder).filter(
+                folder_model.Folder.id == folder_id,
+                folder_model.Folder.user_id == current_user.id
+            ).first()
+            if not folder:
+                raise HTTPException(status_code=404, detail="Folder not found")
+        
         # Create upload directory if it doesn't exist
         upload_dir = f"/app/uploads/user_{current_user.id}"
         os.makedirs(upload_dir, exist_ok=True)
@@ -187,6 +241,7 @@ async def upload_document(
             file_type=os.path.splitext(file.filename)[1],
             file_size=file_size,
             user_id=current_user.id,
+            folder_id=folder_id,
             is_processed=False
         )
         db.add(document)
@@ -197,10 +252,10 @@ async def upload_document(
         processor = DocumentProcessor()
         chunks = processor.process_document(file_path)
         
-        # Add to vector store with user context
+        # Add to vector store with user context and folder metadata
         user_display_name = current_user.full_name or current_user.username
         rag_service = RAGService(user_id=current_user.id, user_name=user_display_name)
-        rag_service.add_documents(chunks)
+        rag_service.add_documents(chunks, folder_id=folder_id)
         
         # Update document status
         document.is_processed = True

@@ -131,8 +131,8 @@ class RAGService:
             ("human", "{input}"),
         ])
         
-    def init_vector_store(self, persist_directory: str = None):
-        """Initialize or load the vector store"""
+    def init_vector_store(self, persist_directory: str = None, folder_id: int = None):
+        """Initialize or load the vector store with optional folder filtering"""
         if persist_directory is None:
             persist_directory = f"{settings.VECTOR_STORE_PATH}/user_{self.user_id}"
             
@@ -142,13 +142,20 @@ class RAGService:
             collection_name=f"user_{self.user_id}_docs"
         )
         
+        # Build search kwargs with optional folder filter
+        search_kwargs = {
+            "k": 8,  # Retrieve more documents (was 4)
+            "fetch_k": 20,  # Fetch more candidates before MMR (was 10)
+            "lambda_mult": 0.5  # Balance between relevance and diversity
+        }
+        
+        # Add folder filter if specified
+        if folder_id is not None:
+            search_kwargs["filter"] = {"folder_id": folder_id}
+        
         self.retriever = self.vector_store.as_retriever(
             search_type="mmr",  # Maximal Marginal Relevance for diversity
-            search_kwargs={
-                "k": 8,  # Retrieve more documents (was 4)
-                "fetch_k": 20,  # Fetch more candidates before MMR (was 10)
-                "lambda_mult": 0.5  # Balance between relevance and diversity
-            }
+            search_kwargs=search_kwargs
         )
         
         # Create history-aware retriever
@@ -170,13 +177,18 @@ class RAGService:
             question_answer_chain
         )
     
-    def add_documents(self, documents: List[Dict[str, Any]]):
-        """Add documents to the vector store"""
+    def add_documents(self, documents: List[Dict[str, Any]], folder_id: int = None):
+        """Add documents to the vector store with optional folder metadata"""
         if not self.vector_store:
             self.init_vector_store()
             
         texts = [doc["page_content"] for doc in documents]
         metadatas = [doc["metadata"] for doc in documents]
+        
+        # Add folder_id to metadata if provided
+        if folder_id is not None:
+            for metadata in metadatas:
+                metadata["folder_id"] = folder_id
         
         self.vector_store.add_texts(
             texts=texts,
@@ -196,10 +208,11 @@ class RAGService:
                 formatted_history.append(AIMessage(content=msg["content"]))
         return formatted_history
     
-    def query(self, question: str, chat_history: List[Dict[str, str]] = None) -> Dict[str, Any]:
-        """Query the RAG system with a question and chat history"""
-        if not self.rag_chain:
-            self.init_vector_store()
+    def query(self, question: str, chat_history: List[Dict[str, str]] = None, folder_id: int = None) -> Dict[str, Any]:
+        """Query the RAG system with a question and chat history, optionally scoped to a folder"""
+        # Reinitialize if folder_id changes (to update retriever filter)
+        if not self.rag_chain or folder_id is not None:
+            self.init_vector_store(folder_id=folder_id)
             
         # Format chat history
         formatted_history = self._format_chat_history(chat_history or [])

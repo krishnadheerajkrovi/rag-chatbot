@@ -1,321 +1,386 @@
 import streamlit as st
-from streamlit_option_menu import option_menu
 import requests
 import os
-from dotenv import load_dotenv
+from streamlit_cookies_manager import EncryptedCookieManager
 
-# Load environment variables
-load_dotenv()
+API_BASE_URL = os.getenv("API_BASE_URL", "http://backend:8000")
 
-# Configuration
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+st.set_page_config(page_title="RAG Chatbot", page_icon="🤖", layout="wide", initial_sidebar_state="expanded")
 
-# Page config
-st.set_page_config(
-    page_title="RAG Chatbot",
-    page_icon="🤖",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# Cookie manager for persistent login
+cookies = EncryptedCookieManager(prefix="rag_chatbot_", password=os.getenv("COOKIE_PASSWORD", "change-this-secret-key"))
+if not cookies.ready():
+    st.stop()
 
-# Custom CSS
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 2rem;
-    }
-    .chat-message {
-        padding: 1rem;
-        border-radius: 0.5rem;
-        margin-bottom: 1rem;
-        color: #1a1a1a;
-    }
-    .user-message {
-        background-color: #e3f2fd;
-        border-left: 4px solid #2196f3;
-        color: #0d47a1;
-    }
-    .assistant-message {
-        background-color: #f5f5f5;
-        border-left: 4px solid #4caf50;
-        color: #1b5e20;
-    }
-    .chat-message strong {
-        color: inherit;
-        font-weight: 600;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# Initialize session state
-if 'token' not in st.session_state:
-    st.session_state.token = None
-if 'user' not in st.session_state:
-    st.session_state.user = None
-if 'session_id' not in st.session_state:
-    st.session_state.session_id = None
-if 'messages' not in st.session_state:
-    st.session_state.messages = []
-
-def is_authenticated():
-    return st.session_state.token is not None
+# Session state with cookie persistence
+if 'initialized' not in st.session_state:
+    st.session_state.initialized = True
+    st.session_state.logged_out = False
+    
+    # Try to restore from cookies only if not logged out and cookies exist
+    if not st.session_state.get('logged_out', False):
+        if 'token' in cookies and cookies['token'] and cookies['token'].strip():
+            st.session_state.token = cookies['token']
+            st.session_state.user = cookies.get('user', 'User')
+    
+    for key, default in [
+        ('token', None), ('user', None), ('folders', []), ('chats', []), ('documents', []),
+        ('current_folder_id', None), ('current_chat_id', None), ('messages', [])
+    ]:
+        if key not in st.session_state:
+            st.session_state[key] = default
 
 def get_headers():
-    if st.session_state.token:
-        return {"Authorization": f"Bearer {st.session_state.token}"}
-    return {}
+    return {"Authorization": f"Bearer {st.session_state.token}"} if st.session_state.token else {}
+
+def load_data():
+    if not st.session_state.token:
+        return
+    try:
+        r = requests.get(f"{API_BASE_URL}/folders/", headers=get_headers())
+        if r.status_code == 200:
+            st.session_state.folders = r.json()
+        else:
+            st.sidebar.error(f"Folders API error: {r.status_code}")
+            st.session_state.folders = []
+        
+        r = requests.get(f"{API_BASE_URL}/chat/sessions", headers=get_headers())
+        st.session_state.chats = r.json() if r.status_code == 200 else []
+        
+        r = requests.get(f"{API_BASE_URL}/chat/documents", headers=get_headers())
+        st.session_state.documents = r.json() if r.status_code == 200 else []
+    except Exception as e:
+        st.sidebar.error(f"Load error: {str(e)}")
 
 def login_page():
-    st.markdown('<div class="main-header">🤖 RAG Chatbot</div>', unsafe_allow_html=True)
-    
+    st.title("🤖 RAG Chatbot")
     tab1, tab2 = st.tabs(["Login", "Register"])
     
     with tab1:
-        st.subheader("Login")
-        with st.form("login_form"):
+        with st.form("login"):
             username = st.text_input("Username")
             password = st.text_input("Password", type="password")
-            submit = st.form_submit_button("Login")
-            
-            if submit:
+            if st.form_submit_button("Login"):
                 try:
-                    response = requests.post(
-                        f"{API_BASE_URL}/auth/token",
-                        data={"username": username, "password": password}
-                    )
-                    if response.status_code == 200:
-                        data = response.json()
-                        st.session_state.token = data["access_token"]
+                    r = requests.post(f"{API_BASE_URL}/auth/token", data={"username": username, "password": password})
+                    if r.status_code == 200:
+                        st.session_state.token = r.json()["access_token"]
                         st.session_state.user = username
-                        st.success("Login successful!")
+                        # Save to cookies
+                        cookies['token'] = st.session_state.token
+                        cookies['user'] = username
+                        cookies.save()
                         st.rerun()
                     else:
                         st.error("Invalid credentials")
                 except Exception as e:
-                    st.error(f"Error: {str(e)}")
+                    st.error(str(e))
     
     with tab2:
-        st.subheader("Register")
-        with st.form("register_form"):
-            reg_username = st.text_input("Username", key="reg_username")
-            reg_email = st.text_input("Email", key="reg_email")
-            reg_full_name = st.text_input("Full Name", key="reg_full_name")
-            reg_password = st.text_input("Password", type="password", key="reg_password")
-            reg_submit = st.form_submit_button("Register")
-            
-            if reg_submit:
+        with st.form("register"):
+            email = st.text_input("Email")
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            full_name = st.text_input("Full Name")
+            if st.form_submit_button("Register"):
                 try:
-                    response = requests.post(
-                        f"{API_BASE_URL}/auth/register",
-                        json={
-                            "username": reg_username,
-                            "email": reg_email,
-                            "full_name": reg_full_name,
-                            "password": reg_password
-                        }
-                    )
-                    if response.status_code == 200:
-                        st.success("Registration successful! Please login.")
+                    r = requests.post(f"{API_BASE_URL}/auth/register", json={
+                        "email": email, "username": username, "password": password, "full_name": full_name
+                    })
+                    if r.status_code == 200:
+                        st.success("Registered! Please login.")
                     else:
-                        st.error(f"Registration failed: {response.json().get('detail', 'Unknown error')}")
+                        st.error(r.json().get('detail', 'Registration failed'))
                 except Exception as e:
-                    st.error(f"Error: {str(e)}")
+                    st.error(str(e))
 
 def chat_page():
-    st.markdown('<div class="main-header">💬 Chat with Your Documents</div>', unsafe_allow_html=True)
+    if st.session_state.token:
+        load_data()
+    
+    # Top bar with menu
+    col1, col2, col3 = st.columns([4, 1, 1])
+    with col1:
+        st.title("💬 RAG Chatbot")
+    with col3:
+        with st.popover("⋮"):
+            st.write(f"**{st.session_state.user}**")
+            if st.button("🚪 Logout", use_container_width=True):
+                # Failproof logout - clear everything
+                try:
+                    # Clear cookies
+                    for key in list(cookies.keys()):
+                        del cookies[key]
+                    cookies.save()
+                except:
+                    pass
+                
+                # Set logout flag before clearing session
+                st.session_state.logged_out = True
+                
+                # Clear session state
+                st.session_state.token = None
+                st.session_state.user = None
+                st.session_state.folders = []
+                st.session_state.chats = []
+                st.session_state.documents = []
+                st.session_state.messages = []
+                st.session_state.current_chat_id = None
+                st.session_state.current_folder_id = None
+                
+                st.rerun()
     
     # Sidebar
     with st.sidebar:
-        st.subheader(f"Welcome, {st.session_state.user}!")
+        # Header with + button
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            st.subheader("📁 Folders")
+        with col2:
+            if st.button("➕", key="add_folder_btn", help="New Folder"):
+                st.session_state.show_new_folder = True
+        # New Folder Dialog
+        if st.session_state.get('show_new_folder'):
+            with st.form("new_folder"):
+                name = st.text_input("Folder Name")
+                if st.form_submit_button("Create"):
+                    if name:
+                        try:
+                            r = requests.post(f"{API_BASE_URL}/folders/", json={"name": name}, headers=get_headers())
+                            if r.status_code == 200:
+                                st.success(f"Created folder: {name}")
+                                st.session_state.show_new_folder = False
+                                st.rerun()
+                            else:
+                                st.error(f"Failed: {r.json().get('detail', 'Unknown error')}")
+                        except Exception as e:
+                            st.error(str(e))
+                    else:
+                        st.warning("Please enter a folder name")
         
-        if st.button("Logout"):
-            st.session_state.token = None
-            st.session_state.user = None
-            st.session_state.session_id = None
-            st.session_state.messages = []
+        st.divider()
+        
+        # Folders & Chats
+        for folder in st.session_state.folders:
+            # Check if this folder is currently selected
+            is_current_folder = st.session_state.current_folder_id == folder['id']
+            folder_icon = "📂" if is_current_folder else "📁"
+            
+            # Folder row with + button and menu
+            col1, col2, col3 = st.columns([4, 0.5, 0.5])
+            with col1:
+                folder_label = f"{folder_icon} **{folder['name']}**" if is_current_folder else f"{folder_icon} {folder['name']}"
+                button_type = "primary" if is_current_folder else "secondary"
+                if st.button(folder_label, key=f"folder_btn_{folder['id']}", type=button_type, use_container_width=True):
+                    # Select this folder
+                    if is_current_folder:
+                        # Deselect if already selected
+                        st.session_state.current_folder_id = None
+                    else:
+                        st.session_state.current_folder_id = folder['id']
+                    st.rerun()
+            with col2:
+                if st.button("➕", key=f"nc{folder['id']}", help="New Chat"):
+                    try:
+                        r = requests.post(f"{API_BASE_URL}/chat/sessions", 
+                                        json={"title": "New Chat", "folder_id": folder['id']}, 
+                                        headers=get_headers())
+                        if r.status_code == 200:
+                            st.session_state.current_chat_id = r.json()['session_id']
+                            st.session_state.current_folder_id = folder['id']
+                            st.session_state.messages = []
+                            st.session_state.loaded_chat_id = st.session_state.current_chat_id
+                            load_data()
+                            st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+            with col3:
+                with st.popover("⋮", use_container_width=True):
+                    if st.button("📦 Archive", key=f"af{folder['id']}", use_container_width=True):
+                        requests.post(f"{API_BASE_URL}/folders/{folder['id']}/archive", headers=get_headers())
+                        load_data()
+                        st.rerun()
+                    if st.button("🗑️ Delete Forever", key=f"df{folder['id']}", use_container_width=True):
+                        requests.delete(f"{API_BASE_URL}/folders/{folder['id']}", headers=get_headers())
+                        load_data()
+                        st.rerun()
+            
+            # Chats in folder (always show if folder is selected)
+            if is_current_folder:
+                with st.container():
+                    # Chats in folder
+                    folder_chats = [c for c in st.session_state.chats if c.get('folder_id') == folder['id']]
+                    if folder_chats:
+                        for chat in folder_chats:
+                            # Highlight selected chat
+                            is_selected = st.session_state.current_chat_id == chat['session_id']
+                            button_type = "primary" if is_selected else "secondary"
+                            button_label = f"💬 **{chat.get('title') or 'Untitled'}**" if is_selected else f"💬 {chat.get('title') or 'Untitled'}"
+                            
+                            if st.button(button_label, key=f"c{chat['id']}", type=button_type, use_container_width=True):
+                                st.session_state.current_chat_id = chat['session_id']
+                                st.session_state.current_folder_id = folder['id']
+                                # Load chat history from backend
+                                try:
+                                    r = requests.get(f"{API_BASE_URL}/chat/history/{chat['session_id']}", headers=get_headers())
+                                    if r.status_code == 200:
+                                        history = r.json()
+                                        st.session_state.messages = [{"role": msg["role"], "content": msg["content"]} for msg in history.get("messages", [])]
+                                        st.session_state.loaded_chat_id = chat['session_id']
+                                except:
+                                    st.session_state.messages = []
+                                st.rerun()
+                    
+                    # Documents in folder
+                    folder_docs = [d for d in st.session_state.documents if d.get('folder_id') == folder['id']]
+                    if folder_docs:
+                        st.caption("📄 Documents:")
+                        for doc in folder_docs:
+                            st.text(f"• {doc['title']}")
+        
+
+        # View Archived Folders
+        if st.button("📦 View Archived", use_container_width=True):
+            st.session_state.show_archived = not st.session_state.get('show_archived', False)
+            if st.session_state.show_archived:
+                try:
+                    r = requests.get(f"{API_BASE_URL}/folders/?include_archived=true", headers=get_headers())
+                    if r.status_code == 200:
+                        archived = [f for f in r.json() if f.get('is_archived')]
+                        st.session_state.archived_folders = archived
+                except:
+                    st.session_state.archived_folders = []
             st.rerun()
         
+        if st.session_state.get('show_archived'):
+            st.caption("📦 Archived Folders:")
+            for folder in st.session_state.get('archived_folders', []):
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.text(f"📁 {folder['name']}")
+                with col2:
+                    if st.button("↩️", key=f"unarch{folder['id']}", help="Unarchive"):
+                        requests.post(f"{API_BASE_URL}/folders/{folder['id']}/unarchive", headers=get_headers())
+                        st.session_state.show_archived = False
+                        load_data()
+                        st.rerun()
+        
         st.divider()
         
-        # Document upload
-        st.subheader("📄 Upload Documents")
-        uploaded_file = st.file_uploader(
-            "Choose a file",
-            type=["pdf", "txt", "md", "docx"]
-        )
-        
+        # Upload
+        st.subheader("📤 Upload")
+        uploaded_file = st.file_uploader("Document", type=["pdf", "txt", "md", "docx"])
         if uploaded_file:
-            title = st.text_input("Document Title", value=uploaded_file.name)
-            description = st.text_area("Description (optional)")
-            
-            if st.button("Upload & Process"):
-                with st.spinner("Processing document..."):
-                    try:
-                        files = {"file": (uploaded_file.name, uploaded_file, uploaded_file.type)}
-                        data = {"title": title, "description": description}
-                        
-                        response = requests.post(
-                            f"{API_BASE_URL}/chat/upload",
-                            files=files,
-                            data=data,
-                            headers=get_headers()
-                        )
-                        
-                        if response.status_code == 200:
-                            st.success("Document uploaded and processed successfully!")
-                        else:
-                            st.error(f"Upload failed: {response.json().get('detail', 'Unknown error')}")
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
-        
-        st.divider()
-        
-        # View documents
-        if st.button("📚 View My Documents"):
-            st.session_state.show_documents = True
-        
-        if st.session_state.get('show_documents'):
-            try:
-                response = requests.get(
-                    f"{API_BASE_URL}/chat/documents",
-                    headers=get_headers()
-                )
-                if response.status_code == 200:
-                    docs = response.json()
-                    if docs:
-                        st.subheader("Your Documents")
-                        for doc in docs:
-                            col1, col2 = st.columns([4, 1])
-                            with col1:
-                                st.write(f"📄 {doc['title']}")
-                                st.caption(f"Type: {doc['file_type']} | Size: {doc['file_size']} bytes")
-                            with col2:
-                                if st.button("🗑️", key=f"delete_{doc['id']}", help="Delete"):
-                                    try:
-                                        delete_response = requests.delete(
-                                            f"{API_BASE_URL}/chat/documents/{doc['id']}",
-                                            headers=get_headers()
-                                        )
-                                        if delete_response.status_code == 200:
-                                            st.success("Deleted!")
-                                            st.session_state.show_documents = False
-                                            st.rerun()
-                                        else:
-                                            st.error("Delete failed")
-                                    except Exception as e:
-                                        st.error(f"Error: {str(e)}")
+            folder_opts = [None] + [f['id'] for f in st.session_state.folders]
+            folder_names = ["No Folder"] + [f['name'] for f in st.session_state.folders]
+            folder_id = st.selectbox("To Folder", folder_opts, format_func=lambda x: folder_names[folder_opts.index(x)])
+            if st.button("Upload"):
+                try:
+                    files = {"file": (uploaded_file.name, uploaded_file, uploaded_file.type)}
+                    data = {"folder_id": folder_id} if folder_id else {}
+                    r = requests.post(f"{API_BASE_URL}/chat/upload", files=files, data=data, headers=get_headers())
+                    if r.status_code == 200:
+                        st.success("Uploaded!")
                     else:
-                        st.info("No documents uploaded yet")
-                        st.session_state.show_documents = False
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
-        
-        st.divider()
-        
-        # Clear chat history
-        if st.button("🗑️ Clear Chat History", help="Delete all chat messages"):
-            try:
-                response = requests.delete(
-                    f"{API_BASE_URL}/chat/sessions/clear",
-                    headers=get_headers()
-                )
-                if response.status_code == 200:
-                    result = response.json()
-                    # Clear ALL frontend session state
-                    for key in list(st.session_state.keys()):
-                        if key not in ['token', 'user']:  # Keep auth state
-                            del st.session_state[key]
-                    # Reset to empty
-                    st.session_state.messages = []
-                    st.session_state.session_id = None
-                    st.success(f"✅ Cleared {result['sessions_deleted']} chat session(s)")
-                    st.rerun()
-                else:
-                    st.error("Failed to clear chat history")
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
-        
-        st.divider()
-        
-        # Reindex all documents
-        if st.button("🔄 Reindex All Documents", help="Clear and rebuild the entire vector store"):
-            if st.session_state.get('confirm_reindex'):
-                with st.spinner("Reindexing all documents... This may take a while."):
-                    try:
-                        response = requests.post(
-                            f"{API_BASE_URL}/chat/documents/reindex-all",
-                            headers=get_headers()
-                        )
-                        if response.status_code == 200:
-                            result = response.json()
-                            st.success(f"✅ Reindexed {result['documents_reindexed']} documents ({result['total_chunks']} chunks)")
-                            st.session_state.confirm_reindex = False
-                            st.rerun()
-                        else:
-                            st.error("Failed to reindex documents")
-                    except Exception as e:
-                        st.error(f"Error: {str(e)}")
-            else:
-                st.warning("⚠️ This will clear your vector store and reprocess all documents. Click again to confirm.")
-                st.session_state.confirm_reindex = True
+                        st.error("Upload failed")
+                except Exception as e:
+                    st.error(str(e))
     
     # Main chat area
-    chat_container = st.container()
+    current_chat = next((c for c in st.session_state.chats if c['session_id'] == st.session_state.current_chat_id), None)
     
-    with chat_container:
-        # Display chat messages
-        for message in st.session_state.messages:
-            role = message["role"]
-            content = message["content"]
-            
-            if role == "user":
-                st.markdown(f'<div class="chat-message user-message"><strong>You:</strong> {content}</div>', 
-                          unsafe_allow_html=True)
+    # Load chat history if we have a chat but no messages loaded yet
+    if current_chat and not st.session_state.get('loaded_chat_id') == st.session_state.current_chat_id:
+        try:
+            r = requests.get(f"{API_BASE_URL}/chat/history/{current_chat['session_id']}", headers=get_headers())
+            if r.status_code == 200:
+                history = r.json()
+                st.session_state.messages = [{"role": msg["role"], "content": msg["content"]} for msg in history.get("messages", [])]
+                st.session_state.loaded_chat_id = st.session_state.current_chat_id
+        except:
+            st.session_state.messages = []
+    
+    # Header with attachment button
+    col1, col2 = st.columns([5, 1])
+    with col1:
+        if current_chat:
+            st.title(f"💬 {current_chat.get('title') or 'Untitled Chat'}")
+            if current_chat.get('folder_id'):
+                folder = next((f for f in st.session_state.folders if f['id'] == current_chat['folder_id']), None)
+                if folder:
+                    st.caption(f"📂 **{folder['name']}** | 🔍 Searching only in this folder")
             else:
-                st.markdown(f'<div class="chat-message assistant-message"><strong>Assistant:</strong> {content}</div>', 
-                          unsafe_allow_html=True)
+                st.caption("📁 No folder | 🔍 Searching all documents")
+        else:
+            st.title("💬 New Chat")
+            st.caption("📁 No folder selected | 🔍 Will search all documents")
     
-    # Chat input
-    user_input = st.chat_input("Ask me anything about your documents...")
+    with col2:
+        if st.button("📎 Attach", use_container_width=True):
+            st.session_state.show_upload_dialog = not st.session_state.get('show_upload_dialog', False)
     
-    if user_input:
-        # Add user message to chat
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        
-        # Send query to API
-        with st.spinner("Thinking..."):
-            try:
-                response = requests.post(
-                    f"{API_BASE_URL}/chat/query",
-                    json={
-                        "query": user_input,
-                        "session_id": st.session_state.session_id
-                    },
-                    headers=get_headers()
-                )
+    # Upload dialog in chat
+    if st.session_state.get('show_upload_dialog'):
+        with st.expander("📎 Upload Document", expanded=True):
+            uploaded_file = st.file_uploader("Choose file", type=["pdf", "txt", "md", "docx"], key="chat_upload")
+            if uploaded_file:
+                # Auto-detect folder from current chat
+                folder_id = current_chat.get('folder_id') if current_chat else None
                 
-                if response.status_code == 200:
-                    data = response.json()
-                    st.session_state.session_id = data["session_id"]
-                    st.session_state.messages.append({
-                        "role": "assistant",
-                        "content": data["answer"]
-                    })
-                    st.rerun()
-                else:
-                    st.error(f"Error: {response.json().get('detail', 'Unknown error')}")
-            except Exception as e:
-                st.error(f"Error: {str(e)}")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("Upload to Current Folder" if folder_id else "Upload (No Folder)", use_container_width=True):
+                        try:
+                            files = {"file": (uploaded_file.name, uploaded_file, uploaded_file.type)}
+                            data = {}
+                            if folder_id:
+                                data["folder_id"] = str(folder_id)
+                            r = requests.post(f"{API_BASE_URL}/chat/upload", files=files, data=data, headers=get_headers())
+                            if r.status_code == 200:
+                                st.success("✅ Uploaded!")
+                                st.session_state.show_upload_dialog = False
+                                load_data()
+                                st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
+                with col2:
+                    if st.button("Cancel", use_container_width=True):
+                        st.session_state.show_upload_dialog = False
+                        st.rerun()
+    
+    st.divider()
+    
+    # Messages
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
+    
+    # Input - only show if we have a chat or can create one
+    if prompt := st.chat_input("Ask anything..." if st.session_state.current_chat_id else "Create a chat to start..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.write(prompt)
+        
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                try:
+                    r = requests.post(f"{API_BASE_URL}/chat/query", json={
+                        "query": prompt,
+                        "session_id": st.session_state.current_chat_id,
+                        "folder_id": st.session_state.current_folder_id
+                    }, headers=get_headers())
+                    if r.status_code == 200:
+                        answer = r.json()["answer"]
+                        st.session_state.messages.append({"role": "assistant", "content": answer})
+                        st.write(answer)
+                        st.session_state.current_chat_id = r.json()["session_id"]
+                    else:
+                        st.error("Query failed")
+                except Exception as e:
+                    st.error(str(e))
 
-def main():
-    if not is_authenticated():
-        login_page()
-    else:
-        chat_page()
-
-if __name__ == "__main__":
-    main()
+# Main
+if not st.session_state.token:
+    login_page()
+else:
+    chat_page()
