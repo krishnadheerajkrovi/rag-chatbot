@@ -99,12 +99,10 @@ def chat_page():
         load_data()
     
     # Top bar with menu
-    col1, col2, col3 = st.columns([4, 1, 1])
-    with col1:
-        st.title("💬 RAG Chatbot")
-    with col3:
-        with st.popover("⋮"):
-            st.write(f"**{st.session_state.user}**")
+    col1, col2 = st.columns([6, 1])
+    with col2:
+        with st.popover("⋮", use_container_width=True):
+            st.write(f"👤 **{st.session_state.user}**")
             if st.button("🚪 Logout", use_container_width=True):
                 # Failproof logout - clear everything
                 try:
@@ -132,13 +130,23 @@ def chat_page():
     
     # Sidebar
     with st.sidebar:
-        # Header with + button
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            st.subheader("📁 Folders")
-        with col2:
-            if st.button("➕", key="add_folder_btn", help="New Folder"):
-                st.session_state.show_new_folder = True
+        # New Chat button at top
+        if st.button("➕ New chat", key="add_chat_btn", use_container_width=True):
+            try:
+                r = requests.post(f"{API_BASE_URL}/chat/sessions", 
+                                json={"title": "New Chat"}, 
+                                headers=get_headers())
+                if r.status_code == 200:
+                    st.session_state.current_chat_id = r.json()['session_id']
+                    st.session_state.current_folder_id = None
+                    st.session_state.messages = []
+                    st.session_state.loaded_chat_id = st.session_state.current_chat_id
+                    load_data()
+                    st.rerun()
+            except Exception as e:
+                st.error(str(e))
+        
+        st.divider()
         # New Folder Dialog
         if st.session_state.get('show_new_folder'):
             with st.form("new_folder"):
@@ -158,85 +166,117 @@ def chat_page():
                     else:
                         st.warning("Please enter a folder name")
         
-        st.divider()
+        # Projects Section
+        st.caption("Projects")
         
-        # Folders & Chats
+        # New project button
+        if st.button("📁 New project", key="add_folder_btn", use_container_width=True):
+            st.session_state.show_new_folder = True
+        
+        # List folders
         for folder in st.session_state.folders:
-            # Check if this folder is currently selected
             is_current_folder = st.session_state.current_folder_id == folder['id']
-            folder_icon = "📂" if is_current_folder else "📁"
             
-            # Folder row with + button and menu
-            col1, col2, col3 = st.columns([4, 0.5, 0.5])
+            col1, col2 = st.columns([5, 1])
             with col1:
-                folder_label = f"{folder_icon} **{folder['name']}**" if is_current_folder else f"{folder_icon} {folder['name']}"
+                folder_label = f"📁 {folder['name']}"
                 button_type = "primary" if is_current_folder else "secondary"
                 if st.button(folder_label, key=f"folder_btn_{folder['id']}", type=button_type, use_container_width=True):
-                    # Select this folder
                     if is_current_folder:
-                        # Deselect if already selected
                         st.session_state.current_folder_id = None
                     else:
                         st.session_state.current_folder_id = folder['id']
                     st.rerun()
             with col2:
-                if st.button("➕", key=f"nc{folder['id']}", help="New Chat"):
-                    try:
-                        r = requests.post(f"{API_BASE_URL}/chat/sessions", 
-                                        json={"title": "New Chat", "folder_id": folder['id']}, 
-                                        headers=get_headers())
-                        if r.status_code == 200:
-                            st.session_state.current_chat_id = r.json()['session_id']
-                            st.session_state.current_folder_id = folder['id']
-                            st.session_state.messages = []
-                            st.session_state.loaded_chat_id = st.session_state.current_chat_id
-                            load_data()
-                            st.rerun()
-                    except Exception as e:
-                        st.error(str(e))
-            with col3:
                 with st.popover("⋮", use_container_width=True):
+                    if st.button("➕ New chat", key=f"nc{folder['id']}", use_container_width=True):
+                        try:
+                            r = requests.post(f"{API_BASE_URL}/chat/sessions", 
+                                            json={"title": "New Chat", "folder_id": folder['id']}, 
+                                            headers=get_headers())
+                            if r.status_code == 200:
+                                st.session_state.current_chat_id = r.json()['session_id']
+                                st.session_state.current_folder_id = folder['id']
+                                st.session_state.messages = []
+                                st.session_state.loaded_chat_id = st.session_state.current_chat_id
+                                load_data()
+                                st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
                     if st.button("📦 Archive", key=f"af{folder['id']}", use_container_width=True):
                         requests.post(f"{API_BASE_URL}/folders/{folder['id']}/archive", headers=get_headers())
                         load_data()
                         st.rerun()
-                    if st.button("🗑️ Delete Forever", key=f"df{folder['id']}", use_container_width=True):
+                    if st.button("🗑️ Delete", key=f"df{folder['id']}", use_container_width=True):
                         requests.delete(f"{API_BASE_URL}/folders/{folder['id']}", headers=get_headers())
                         load_data()
                         st.rerun()
             
-            # Chats in folder (always show if folder is selected)
+            # Show chats in expanded folder
             if is_current_folder:
-                with st.container():
-                    # Chats in folder
-                    folder_chats = [c for c in st.session_state.chats if c.get('folder_id') == folder['id']]
-                    if folder_chats:
-                        for chat in folder_chats:
-                            # Highlight selected chat
-                            is_selected = st.session_state.current_chat_id == chat['session_id']
-                            button_type = "primary" if is_selected else "secondary"
-                            button_label = f"💬 **{chat.get('title') or 'Untitled'}**" if is_selected else f"💬 {chat.get('title') or 'Untitled'}"
-                            
-                            if st.button(button_label, key=f"c{chat['id']}", type=button_type, use_container_width=True):
-                                st.session_state.current_chat_id = chat['session_id']
-                                st.session_state.current_folder_id = folder['id']
-                                # Load chat history from backend
-                                try:
-                                    r = requests.get(f"{API_BASE_URL}/chat/history/{chat['session_id']}", headers=get_headers())
-                                    if r.status_code == 200:
-                                        history = r.json()
-                                        st.session_state.messages = [{"role": msg["role"], "content": msg["content"]} for msg in history.get("messages", [])]
-                                        st.session_state.loaded_chat_id = chat['session_id']
-                                except:
-                                    st.session_state.messages = []
-                                st.rerun()
+                folder_chats = [c for c in st.session_state.chats if c.get('folder_id') == folder['id']]
+                for chat in folder_chats:
+                    is_selected = st.session_state.current_chat_id == chat['session_id']
                     
-                    # Documents in folder
-                    folder_docs = [d for d in st.session_state.documents if d.get('folder_id') == folder['id']]
-                    if folder_docs:
-                        st.caption("📄 Documents:")
-                        for doc in folder_docs:
-                            st.text(f"• {doc['title']}")
+                    col1, col2 = st.columns([5, 1])
+                    with col1:
+                        chat_label = f"  💬 {chat.get('title') or 'Untitled'}"
+                        if st.button(chat_label, key=f"c{chat['id']}", type="primary" if is_selected else "secondary", use_container_width=True):
+                            st.session_state.current_chat_id = chat['session_id']
+                            st.session_state.current_folder_id = folder['id']
+                            try:
+                                r = requests.get(f"{API_BASE_URL}/chat/history/{chat['session_id']}", headers=get_headers())
+                                if r.status_code == 200:
+                                    history = r.json()
+                                    st.session_state.messages = [{"role": msg["role"], "content": msg["content"]} for msg in history.get("messages", [])]
+                                    st.session_state.loaded_chat_id = chat['session_id']
+                            except:
+                                st.session_state.messages = []
+                            st.rerun()
+                    with col2:
+                        with st.popover("⋮", use_container_width=True):
+                            if st.button("✏️ Rename", key=f"rename{chat['id']}", use_container_width=True):
+                                st.session_state.show_rename_chat = chat['id']
+                                st.rerun()
+                            if st.button("🗑️ Delete", key=f"delchat{chat['id']}", use_container_width=True):
+                                requests.delete(f"{API_BASE_URL}/chat/sessions/{chat['session_id']}", headers=get_headers())
+                                load_data()
+                                st.rerun()
+        
+        st.divider()
+        
+        # Chats Section
+        st.caption("Chats")
+        
+        # List chats without folders
+        no_folder_chats = [c for c in st.session_state.chats if not c.get('folder_id')]
+        for chat in no_folder_chats:
+            is_selected = st.session_state.current_chat_id == chat['session_id']
+            
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                chat_label = f"💬 {chat.get('title') or 'Untitled'}"
+                if st.button(chat_label, key=f"chat_{chat['id']}", type="primary" if is_selected else "secondary", use_container_width=True):
+                    st.session_state.current_chat_id = chat['session_id']
+                    st.session_state.current_folder_id = None
+                    try:
+                        r = requests.get(f"{API_BASE_URL}/chat/history/{chat['session_id']}", headers=get_headers())
+                        if r.status_code == 200:
+                            history = r.json()
+                            st.session_state.messages = [{"role": msg["role"], "content": msg["content"]} for msg in history.get("messages", [])]
+                            st.session_state.loaded_chat_id = chat['session_id']
+                    except:
+                        st.session_state.messages = []
+                    st.rerun()
+            with col2:
+                with st.popover("⋮", use_container_width=True):
+                    if st.button("✏️ Rename", key=f"rename_nf{chat['id']}", use_container_width=True):
+                        st.session_state.show_rename_chat = chat['id']
+                        st.rerun()
+                    if st.button("🗑️ Delete", key=f"del_nf{chat['id']}", use_container_width=True):
+                        requests.delete(f"{API_BASE_URL}/chat/sessions/{chat['session_id']}", headers=get_headers())
+                        load_data()
+                        st.rerun()
         
 
         # View Archived Folders
@@ -304,16 +344,16 @@ def chat_page():
     col1, col2 = st.columns([5, 1])
     with col1:
         if current_chat:
-            st.title(f"💬 {current_chat.get('title') or 'Untitled Chat'}")
+            st.markdown(f"### {current_chat.get('title') or 'Untitled Chat'}")
             if current_chat.get('folder_id'):
                 folder = next((f for f in st.session_state.folders if f['id'] == current_chat['folder_id']), None)
                 if folder:
-                    st.caption(f"📂 **{folder['name']}** | 🔍 Searching only in this folder")
+                    st.caption(f"📂 {folder['name']}")
             else:
-                st.caption("📁 No folder | 🔍 Searching all documents")
+                st.caption("💬 General chat")
         else:
-            st.title("💬 New Chat")
-            st.caption("📁 No folder selected | 🔍 Will search all documents")
+            st.markdown("### Start a new conversation")
+            st.caption("Create or select a chat from the sidebar")
     
     with col2:
         if st.button("📎 Attach", use_container_width=True):
